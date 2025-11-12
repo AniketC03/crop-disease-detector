@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Crop Disease Detector — Prototype</title>
+
+<!-- TensorFlow + Teachable Machine helper -->
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@latest/dist/tf.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@teachablemachine/image@latest/dist/teachablemachine-image.min.js"></script>
+
+<style>
+  :root{
+    --bg1:#e6f7ef;
+    --bg2:#cde9c9;
+    --card:#ffffff;
+    --accent:#2e8b45;
+    --muted:#666;
+  }
+  *{box-sizing:border-box}
+  body{
+    font-family: Inter, "Poppins", system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial;
+    background: linear-gradient(120deg,var(--bg1),var(--bg2));
+    margin:0; padding:36px; display:flex; justify-content:center; align-items:flex-start; min-height:100vh;
+    color:#123;
+  }
+
+  .app {
+    width:100%; max-width:480px; background:var(--card); border-radius:16px; padding:20px; box-shadow:0 12px 36px rgba(16,36,10,0.12);
+  }
+
+  header{display:flex;align-items:center;gap:12px}
+  header h1{margin:0;font-size:1.25rem}
+  header p{margin:0;color:var(--muted);font-size:0.85rem}
+
+  .u-row{display:flex;gap:12px;align-items:center;margin-top:16px}
+  input[type=file]{flex:1}
+  button {
+    background:var(--accent); color:#fff; border:0; padding:10px 14px; border-radius:10px; cursor:pointer; font-weight:600;
+    box-shadow: 0 6px 16px rgba(46,139,69,0.14);
+  }
+  button:disabled{opacity:0.55; cursor:not-allowed; box-shadow:none}
+
+  .preview{
+    margin-top:16px; display:flex; gap:12px; align-items:flex-start;
+  }
+
+  .preview img{
+    width:140px; height:140px; object-fit:cover; border-radius:12px; border:1px solid #eee;
+  }
+
+  .info {
+    flex:1; padding:8px 6px;
+  }
+
+  .loader {
+    display:inline-flex; align-items:center; gap:8px; color:var(--muted);
+  }
+  .spinner {
+    width:20px; height:20px; border-radius:50%;
+    border:3px solid rgba(0,0,0,0.08); border-top-color:var(--accent); animation:spin 1s linear infinite;
+  }
+  @keyframes spin { to{transform:rotate(360deg)} }
+
+  #resultCard{
+    margin-top:18px; border-radius:12px; padding:14px; background:linear-gradient(180deg,#fbfffa,#f7fff6); border:1px solid rgba(46,139,69,0.06);
+    display:none;
+  }
+
+  #resultCard h3{margin:0 0 8px 0}
+  .confidence{color:var(--muted); font-size:0.95rem; margin-bottom:8px}
+  .tips{font-size:0.92rem; color:#2e2e2e}
+  .small{font-size:0.8rem;color:var(--muted); margin-top:8px}
+
+  .error{color:#8b1a1a;background:#fff0f0;padding:10px;border-radius:8px;margin-top:12px;border:1px solid rgba(139,26,26,0.08)}
+  footer{margin-top:18px;color:var(--muted); font-size:0.85rem}
+</style>
+</head>
+<body>
+  <div class="app" role="application" aria-label="Crop Disease Detector prototype">
+    <header>
+      <div style="width:46px;height:46px;border-radius:10px;background:linear-gradient(180deg,var(--accent),#1f6b36);display:flex;align-items:center;justify-content:center;color:#fff;font-weight:700">CD</div>
+      <div>
+        <h1>Crop Disease Detector</h1>
+        <p>Prototype demo — upload a leaf image and click Detect. (No TF.js required on your side; model loads from Teachable Machine)</p>
+      </div>
+    </header>
+
+    <div class="u-row" style="margin-top:18px">
+      <input id="fileInput" type="file" accept="image/*" aria-label="Choose an image" />
+      <button id="detectBtn" disabled>Detect</button>
+    </div>
+
+    <div class="preview" aria-hidden="false">
+      <img id="previewImg" src="" alt="preview image" style="display:none" />
+      <div class="info">
+        <div id="status" class="loader"><span class="spinner"></span><span id="statusText">Loading model...</span></div>
+        <div class="small" style="margin-top:8px">Model: <strong>AWWNvto-2</strong> (hosted)</div>
+        <div id="errorBox" class="error" style="display:none"></div>
+      </div>
+    </div>
+
+    <div id="resultCard" role="status" aria-live="polite">
+      <h3 id="diseaseName">—</h3>
+      <div class="confidence" id="confidenceText">Confidence: —</div>
+      <div class="tips" id="treatmentText"></div>
+    </div>
+
+    <footer>
+      Tip: if the page can't load the model, open your browser console (F12) and check errors. If file doesn't work, run a local server: <code>python -m http.server 8000</code>.
+    </footer>
+  </div>
+
+<script>
+  // YOUR Teachable Machine model URL (you already gave this)
+  const MODEL_BASE = "https://teachablemachine.withgoogle.com/models/AWWNvto-2/";
+
+  // DOM
+  const fileInput = document.getElementById('fileInput');
+  const detectBtn = document.getElementById('detectBtn');
+  const previewImg = document.getElementById('previewImg');
+  const statusText = document.getElementById('statusText');
+  const resultCard = document.getElementById('resultCard');
+  const diseaseName = document.getElementById('diseaseName');
+  const confidenceText = document.getElementById('confidenceText');
+  const treatmentText = document.getElementById('treatmentText');
+  const errorBox = document.getElementById('errorBox');
+
+  let model = null;
+  let modelLoaded = false;
+
+  // small database of short tips to show on result (so UI looks real)
+  const TIPS = {
+    "Healthy": {
+      treatment: "Leaf looks healthy. Maintain regular irrigation and monitor weekly.",
+    },
+    "Blight": {
+      treatment: "Apply recommended fungicide. Remove and burn infected leaves. Improve airflow.",
+    },
+    "Spot": {
+      treatment: "Use copper fungicide and remove infected foliage. Avoid overhead watering.",
+    },
+    "Powdery Mildew": {
+      treatment: "Spray with sulfur-based fungicide and remove affected parts. Improve sunlight.",
+    }
+  };
+
+  // Initialize: load model
+  async function initModel(){
+    statusText.innerText = "Loading model...";
+    try {
+      const modelURL = MODEL_BASE + "model.json";
+      const metadataURL = MODEL_BASE + "metadata.json";
+      model = await tmImage.load(modelURL, metadataURL);
+      modelLoaded = true;
+      statusText.innerText = "Model loaded — choose an image";
+      document.querySelector('.spinner').style.borderTopColor = "#2e8b45";
+      detectBtn.disabled = true; // enabled only when image selected
+    } catch (err) {
+      console.error("Model load failed:", err);
+      statusText.innerText = "Model failed to load";
+      showError("Could not load the model. Check console or your internet connection.");
+      modelLoaded = false;
+      // keep detect disabled
+    }
+  }
+
+  // show error message
+  function showError(msg){
+    errorBox.style.display = 'block';
+    errorBox.textContent = msg;
+  }
+
+  // clear error
+  function clearError(){
+    errorBox.style.display = 'none';
+    errorBox.textContent = '';
+  }
+
+  // handle file selection & preview
+  fileInput.addEventListener('change', () => {
+    clearError();
+    const file = fileInput.files[0];
+    if (!file) {
+      previewImg.style.display = 'none';
+      detectBtn.disabled = true;
+      return;
+    }
+    const url = URL.createObjectURL(file);
+    previewImg.src = url;
+    previewImg.style.display = 'block';
+    resultCard.style.display = 'none';
+    detectBtn.disabled = !modelLoaded; // enable only if model is ready
+  });
+
+  // predict handler
+  detectBtn.addEventListener('click', async () => {
+    clearError();
+    const file = fileInput.files[0];
+    if (!file) { showError("Please choose an image first."); return; }
+    if (!modelLoaded) { showError("Model not ready yet."); return; }
+
+    detectBtn.disabled = true;
+    statusText.innerText = "Analyzing image...";
+    document.querySelector('.spinner').style.borderTopColor = "#f39c12";
+
+    try {
+      // create image element and wait to decode
+      const img = document.createElement('img');
+      img.src = URL.createObjectURL(file);
+      await img.decode();
+
+      // run prediction
+      const preds = await model.predict(img);
+      preds.sort((a,b) => b.probability - a.probability);
+      const top = preds[0];
+
+      // Display neat result
+      diseaseName.textContent = top.className;
+      confidenceText.textContent = "Confidence: " + (top.probability * 100).toFixed(2) + "%";
+
+      // treatment text from TIPS database or generic fallback
+      const key = top.className;
+      treatmentText.textContent = (TIPS[key] && TIPS[key].treatment) ? TIPS[key].treatment : "Suggested action: inspect crop and consult local agronomist.";
+
+      resultCard.style.display = 'block';
+      statusText.innerText = "Done";
+      document.querySelector('.spinner').style.borderTopColor = "#2e8b45";
+    } catch (err) {
+      console.error("Prediction failed:", err);
+      showError("Prediction failed. See console for details.");
+      statusText.innerText = "Error";
+      document.querySelector('.spinner').style.borderTopColor = "#8b1a1a";
+    } finally {
+      detectBtn.disabled = false;
+    }
+  });
+
+  // auto-init
+  initModel();
+
+  // usability: support Enter key to trigger detect if image loaded
+  fileInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !detectBtn.disabled) detectBtn.click();
+  });
+</script>
+</body>
+</html>
